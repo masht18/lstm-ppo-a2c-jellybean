@@ -24,23 +24,33 @@ class Agent():
         self.lz4_compress = False
 
         self.feature_pool = torch.nn.MaxPool2d(5)
-        self.actor_lstm = torch.nn.LSTM(3*3*4+3+27, 16, num_layers=2).to(device)
-        self.actor = torch.nn.Sequential(torch.nn.Linear(16, 4), 
+        #self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 64, num_layers=2).to(device)
+        self.actor = torch.nn.Sequential(torch.nn.Linear(3*3*4+3+27, 32),
+                                          torch.nn.Tanh(),
+                                         torch.nn.Linear(32, 32),
+                                        torch.nn.Tanh(),
+                                         torch.nn.Linear(32, 4), 
                                          torch.nn.Softmax(dim=1)).to(device)
-        self.critic = torch.nn.Sequential(torch.nn.Linear(3*3*4+3+27, 16),
-                                          torch.nn.ReLU(), 
-                                          torch.nn.Linear(16, 1)).to(device)
+        self.critic = torch.nn.Sequential(torch.nn.Linear(3*3*4+3+27, 32),
+                                          torch.nn.Tanh(),
+                                          torch.nn.Linear(32, 32),
+                                          torch.nn.Tanh(), 
+                                          torch.nn.Linear(32, 1)).to(device)
 
-        self.optimizer_actor = torch.optim.Adam(list(self.actor.parameters()) + list(self.actor_lstm.parameters()), lr=0.001)
-        self.optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=0.01)
+        self.optimizer = torch.optim.Adam([
+                        {'params': self.actor.parameters(), 'lr': 0.0003},
+                        {'params': self.critic.parameters(), 'lr': 0.001}
+                    ])
+        self.MseLoss = torch.nn.MSELoss()
 
-        #self.g_last_goal = np.zeros(11)
 
-        self.discount = 0.7
+        self.discount = 0.99
 
-        self.num_stack = 10
+        self.num_stack = 2000
+        self.window = int(self.num_stack/2)
         self.step_freq = 100
         self.t = 0
+        self.eps_clip = 0.2
 
         self.vision_frames = deque(maxlen=self.num_stack)
         self.scent_frames = deque(maxlen=self.num_stack)
@@ -48,16 +58,11 @@ class Agent():
         self.rewards = deque(maxlen=self.num_stack)
         self.actions = deque(maxlen=self.num_stack)
         
-        self.vision_frames_eval = deque(maxlen=self.num_stack)
-        self.scent_frames_eval = deque(maxlen=self.num_stack)
-        self.feature_frames_eval = deque(maxlen=self.num_stack)
-        
-        self.actor_loss = 0
-        self.critic_loss = 0
+        self.old_log_probs = torch.zeros(self.window).to(device)
 
     def load_weights(self, root_path):
-        lstm_weights = os.path.join(root_path, 'policy_lstm.pth')
-        self.actor_lstm.load_state_dict(torch.load(policy_weights))
+        #lstm_weights = os.path.join(root_path, 'policy_lstm.pth')
+        #self.actor_lstm.load_state_dict(torch.load(policy_weights))
         
         actor_weights = os.path.join(root_path, 'actor.pth')
         self.actor.load_state_dict(torch.load(actor_weights))
@@ -67,18 +72,13 @@ class Agent():
         
 
     def act(self, curr_obs, mode='eval'):
-        if curr_obs==None or not len(self.vision_frames_eval) == 0:
+        if curr_obs==None:
             return self.env_specs['action_space'].sample()
         curr_scent, curr_vision, curr_features, _ = curr_obs
         curr_features = self.pool_features(curr_features)
         curr_vision = self.pool_vision(curr_vision)
         
-        self.vision_frames_eval.append(curr_vision)
-        self.scent_frames_eval.append(curr_scent)
-        self.feature_frames_eval.append(curr_features)
-        
-        probs = self.policy_function(self._tensor_from_queue(self.feature_frames_eval), self._tensor_from_queue(self.scent_frames_eval),
-                                     self._tensor_from_queue(self.vision_frames_eval))
+        probs = self.policy_function(torch.tensor(curr_features), torch.tensor(curr_scent), torch.tensor(curr_vision))
         
         if mode == 'eval':
             return torch.argmax(probs)
@@ -103,43 +103,49 @@ class Agent():
         self.vision_frames.append(curr_vision)
         self.scent_frames.append(curr_scent)
         self.feature_frames.append(curr_features)
-        self.rewards.append([reward])
-        self.actions.append([action])
+        self.rewards.append(reward)
+        self.actions.append(action)
         self.t += 1
         
-        if timestep >= self.num_stack:
-            value = self.critic_function(self._tensor_from_queue(self.feature_frames)[5:], 
-                                         self._tensor_from_queue(self.scent_frames)[5:],
-                                        self._tensor_from_queue(self.vision_frames)[5:])
-            probs = self.policy_function(self._tensor_from_queue(self.feature_frames)[:5], 
-                                         self._tensor_from_queue(self.scent_frames)[:5],
-                                         self._tensor_from_queue(self.vision_frames)[:5])
+        if self.t == self.num_stack:
+            value = self.critic_function(self._tensor_from_queue(self.feature_frames)[:self.window], 
+                                         self._tensor_from_queue(self.scent_frames)[:self.window],
+                                        self._tensor_from_queue(self.vision_frames)[:self.window])
+            probs = self.policy_function(self._tensor_from_queue(self.feature_frames)[:self.window], 
+                                         self._tensor_from_queue(self.scent_frames)[:self.window],
+                                         self._tensor_from_queue(self.vision_frames)[:self.window])
             dist = torch.distributions.Categorical(probs=probs)
-            advantage = self.calculate_return() - value
-            #print(self.calculate_return())
-            #print(value)
-            #print(self.rewards)
+            dist_entropy = dist.entropy()
+            
+            rewards = self.calculate_return()
+            advantage = rewards - value.detach()
+            
+            ratios = torch.exp(dist.log_prob(self._tensor_from_queue(self.actions)[:self.window]) - self.old_log_probs)
+            surr1 = ratios * advantage
+            surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantage
 
-            self.critic_loss += advantage.pow(2)
-            self.actor_loss += -dist.log_prob(self._tensor_from_queue(self.actions)[5])*advantage.detach()
+            # final loss of clipped objective PPO
+            loss = -torch.min(surr1, surr2) + 0.5*self.MseLoss(value, rewards) - 0.01*dist_entropy
+            loss = loss.mean()
+            #print(loss)
             
-        if self.t == self.step_freq:
-            self.optimizer_critic.zero_grad()
-            self.critic_loss.backward()
-            self.optimizer_critic.step()
+            # store the old log prob estimates for next actions
+            with torch.no_grad():
+                next_probs = self.policy_function(self._tensor_from_queue(self.feature_frames)[self.window:], 
+                                             self._tensor_from_queue(self.scent_frames)[self.window:],
+                                             self._tensor_from_queue(self.vision_frames)[self.window:])
+                dist = torch.distributions.Categorical(probs=next_probs)
+
+                self.old_log_probs = dist.log_prob(self._tensor_from_queue(self.actions)[self.window:])
             
-            self.optimizer_actor.zero_grad()
-            self.actor_loss.backward()
-            self.optimizer_actor.step()
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
             
-            self.actor_loss = 0
-            self.critic_loss = 0
-            self.t = 0
+            self.t = self.window
             
-        if timestep > 4990 and timestep < 5000:
-            print(probs)
-            print(self.actor_loss)
-            print(self.critic_loss)
+            #if timestep > 4990 and timestep < 5000:
+            #    print(probs)
             
         if done:
             self.model_save()
@@ -149,8 +155,8 @@ class Agent():
         pass
     
     def model_save(self):
-        PATH = 'policy_lstm.pth'
-        torch.save(self.actor_lstm.state_dict(), PATH)
+        #PATH = 'policy_lstm.pth'
+        #torch.save(self.actor_lstm.state_dict(), PATH)
         
         PATH = 'actor.pth'
         torch.save(self.actor.state_dict(), PATH)
@@ -173,41 +179,28 @@ class Agent():
         #scents = torch.from_numpy(scents).to(device).squeeze()
         #print(features)
         #print(scents)
-        inputs = torch.cat([features, scents, vision], dim=1).unsqueeze(1).to(device)
+        if scents.shape[0] == 3:
+            inputs = torch.cat([features, scents, vision]).unsqueeze(0).to(device)
+        else:
+            inputs = torch.cat([features, scents, vision], dim=1).to(device)
 
-        h, _ = self.actor_lstm(inputs.float())
+        #h, _ = self.actor_lstm(inputs.float())
         #print(h)
-        output = self.actor(h[-1])
-        #print(output)
+        output = self.actor(inputs.float())
 
-        return output
+        return torch.squeeze(output)
     
     def critic_function(self, features, scents, vision):
         inputs = torch.cat([features, scents, vision], dim=1).unsqueeze(1).to(device)
 
         output = self.critic(inputs.float())
         
-        return torch.squeeze(output).sum()
+        return torch.squeeze(output)
 
     def calculate_return(self):
-        discounts = np.array([self.discount**i for i in range(int(self.num_stack/2))])
-        return np.sum(np.array(self.rewards)[5:].flatten() * discounts)
+        discounts = torch.tensor([self.discount**i for i in range(self.window)]).to(device)
+        return self._tensor_from_queue(self.rewards)[:self.window] * discounts
     
     def _tensor_from_queue(self, queue):
         return torch.tensor(queue).to(device)
-    
-    def _get_vision(self):
-        assert len(self.vision_frames) == self.num_stack, (len(
-            self.vision_frames), self.num_stack)
-        return LazyFrames(list(self.vision_frames), self.lz4_compress)
-
-    def _get_scent(self):
-        assert len(self.scent_frames) == self.num_stack, (len(
-            self.scent_frames), self.num_stack)
-        return LazyFrames(list(self.scent_frames), self.lz4_compress)
-
-    def _get_feature(self):
-        assert len(self.feature_frames) == self.num_stack, (len(
-            self.feature_frames), self.num_stack)
-        return LazyFrames(list(self.feature_frames), self.lz4_compress)
 
