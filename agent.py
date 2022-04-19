@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 from torch import log
 import torch.nn
 import torch.optim
