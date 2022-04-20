@@ -24,32 +24,35 @@ class Agent():
 
         self.feature_pool = torch.nn.MaxPool2d(5)
         #self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 64, num_layers=2).to(device)
-        self.actor = torch.nn.Sequential(torch.nn.Linear(3*3*4+3+27, 32),
+        self.actor = torch.nn.Sequential(torch.nn.Linear(15*15*4+3+27, 128),
                                           torch.nn.Tanh(),
-                                         torch.nn.Linear(32, 32),
+                                         torch.nn.Linear(128, 128),
                                         torch.nn.Tanh(),
-                                         torch.nn.Linear(32, 4), 
+                                         torch.nn.Linear(128, 4), 
                                          torch.nn.Softmax(dim=1)).to(device)
-        self.critic = torch.nn.Sequential(torch.nn.Linear(3*3*4+3+27, 32),
+        self.critic = torch.nn.Sequential(torch.nn.Linear(15*15*4+3+27, 128),
                                           torch.nn.Tanh(),
-                                          torch.nn.Linear(32, 32),
+                                          torch.nn.Linear(128, 128),
                                           torch.nn.Tanh(), 
-                                          torch.nn.Linear(32, 1)).to(device)
+                                          torch.nn.Linear(128, 1)).to(device)
 
         self.optimizer = torch.optim.Adam([
-                        {'params': self.actor.parameters(), 'lr': 0.0003},
-                        {'params': self.critic.parameters(), 'lr': 0.001}
+                        {'params': self.actor.parameters(), 'lr': 0.00003},
+                        {'params': self.critic.parameters(), 'lr': 0.0001}
                     ])
         self.MseLoss = torch.nn.MSELoss()
 
-
-        self.discount = 0.99
-
-        self.num_stack = 2000
+        #self.g_last_goal = np.zeros(11)
+        
+        self.num_stack = 10000
         self.window = int(self.num_stack/2)
-        self.step_freq = 100
+        self.batch_size = 2000
         self.t = 0
         self.eps_clip = 0.2
+
+        self.gamma = 1
+        self.discounts = torch.tensor([self.gamma**i for i in range(self.window)]).to(device)
+        self.epochs = 4
 
         self.vision_frames = deque(maxlen=self.num_stack)
         self.scent_frames = deque(maxlen=self.num_stack)
@@ -60,8 +63,6 @@ class Agent():
         self.old_log_probs = torch.zeros(self.window).to(device)
 
     def load_weights(self, root_path):
-        #lstm_weights = os.path.join(root_path, 'policy_lstm.pth')
-        #self.actor_lstm.load_state_dict(torch.load(policy_weights))
         
         actor_weights = os.path.join(root_path, 'actor.pth')
         self.actor.load_state_dict(torch.load(actor_weights))
@@ -74,7 +75,7 @@ class Agent():
         if curr_obs==None:
             return self.env_specs['action_space'].sample()
         curr_scent, curr_vision, curr_features, _ = curr_obs
-        curr_features = self.pool_features(curr_features)
+        #curr_features = self.pool_features(curr_features)
         curr_vision = self.pool_vision(curr_vision)
         
         probs = self.policy_function(torch.tensor(curr_features), torch.tensor(curr_scent), torch.tensor(curr_vision))
@@ -94,8 +95,8 @@ class Agent():
         curr_scent, curr_vision, curr_features,  _ = curr_obs
         next_scent, curr_vision, next_features, _ = next_obs
         
-        next_features = self.pool_features(next_features)
-        curr_features = self.pool_features(curr_features)
+        #next_features = self.pool_features(next_features)
+        #curr_features = self.pool_features(curr_features)
         
         curr_vision = self.pool_vision(curr_vision)
         
@@ -107,26 +108,36 @@ class Agent():
         self.t += 1
         
         if self.t == self.num_stack:
-            value = self.critic_function(self._tensor_from_queue(self.feature_frames)[:self.window], 
-                                         self._tensor_from_queue(self.scent_frames)[:self.window],
-                                        self._tensor_from_queue(self.vision_frames)[:self.window])
-            probs = self.policy_function(self._tensor_from_queue(self.feature_frames)[:self.window], 
-                                         self._tensor_from_queue(self.scent_frames)[:self.window],
-                                         self._tensor_from_queue(self.vision_frames)[:self.window])
-            dist = torch.distributions.Categorical(probs=probs)
-            dist_entropy = dist.entropy()
             
-            rewards = self.calculate_return()
-            advantage = rewards - value.detach()
-            
-            ratios = torch.exp(dist.log_prob(self._tensor_from_queue(self.actions)[:self.window]) - self.old_log_probs)
-            surr1 = ratios * advantage
-            surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantage
+            # update for given num epochs
+            for _ in range(self.epochs):
+                for i in range(int(self.window/self.batch_size)):
+                    value = self.critic_function(self._tensor_from_queue(self.feature_frames)[i*self.batch_size:(i+1)*self.batch_size], 
+                                             self._tensor_from_queue(self.scent_frames)[i*self.batch_size:(i+1)*self.batch_size],
+                                            self._tensor_from_queue(self.vision_frames)[i*self.batch_size:(i+1)*self.batch_size])
+                    probs = self.policy_function(self._tensor_from_queue(self.feature_frames)[i*self.batch_size:(i+1)*self.batch_size], 
+                                                 self._tensor_from_queue(self.scent_frames)[i*self.batch_size:(i+1)*self.batch_size],
+                                                 self._tensor_from_queue(self.vision_frames)[i*self.batch_size:(i+1)*self.batch_size])
+                    dist = torch.distributions.Categorical(probs=probs)
+                    dist_entropy = dist.entropy()
 
-            # final loss of clipped objective PPO
-            loss = -torch.min(surr1, surr2) + 0.5*self.MseLoss(value, rewards) - 0.01*dist_entropy
-            loss = loss.mean()
-            #print(loss)
+                    rewards = self.calculate_return(i*self.batch_size, (i+1)*self.batch_size)
+                    advantage = rewards - value.detach()
+
+                    ratios = torch.exp(dist.log_prob(self._tensor_from_queue(self.actions)[i*self.batch_size:(i+1)*self.batch_size])-self.old_log_probs[i*self.batch_size:(i+1)*self.batch_size])
+                    surr1 = ratios * advantage
+                    surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantage
+
+                    # final loss of clipped objective PPO
+                    loss = -torch.min(surr1, surr2) + 0.5*self.MseLoss(value, rewards) - 0.01*dist_entropy
+                    loss = loss.mean()
+                    #print(loss)
+
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+            
+            self.t = self.window
             
             # store the old log prob estimates for next actions
             with torch.no_grad():
@@ -137,14 +148,8 @@ class Agent():
 
                 self.old_log_probs = dist.log_prob(self._tensor_from_queue(self.actions)[self.window:])
             
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            
-            self.t = self.window
-            
-            #if timestep > 4990 and timestep < 5000:
-            #    print(probs)
+            if timestep > 4990 and timestep < 5000:
+                print(probs)
             
         if done:
             self.model_save()
@@ -175,16 +180,11 @@ class Agent():
         return np.array(vision.flatten())
 
     def policy_function(self, features, scents, vision):
-        #scents = torch.from_numpy(scents).to(device).squeeze()
-        #print(features)
-        #print(scents)
         if scents.shape[0] == 3:
             inputs = torch.cat([features, scents, vision]).unsqueeze(0).to(device)
         else:
             inputs = torch.cat([features, scents, vision], dim=1).to(device)
 
-        #h, _ = self.actor_lstm(inputs.float())
-        #print(h)
         output = self.actor(inputs.float())
 
         return torch.squeeze(output)
@@ -196,9 +196,8 @@ class Agent():
         
         return torch.squeeze(output)
 
-    def calculate_return(self):
-        discounts = torch.tensor([self.discount**i for i in range(self.window)]).to(device)
-        return self._tensor_from_queue(self.rewards)[:self.window] * discounts
+    def calculate_return(self, start, end):
+        return self._tensor_from_queue(self.rewards)[start:end] * self.discounts[start:end]
     
     def _tensor_from_queue(self, queue):
         return torch.tensor(queue).to(device)
