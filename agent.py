@@ -62,7 +62,7 @@ class Agent():
         self.old_log_probs = torch.zeros(self.window).to(device)
 
     def load_weights(self, root_path):
-        lstm_weights = os.path.join(root_path, 'actor_lstm.pth')
+        lstm_weights = os.path.join(root_path, 'policy_lstm.pth')
         self.actor_lstm.load_state_dict(torch.load(lstm_weights))
         
         actor_weights = os.path.join(root_path, 'actor.pth')
