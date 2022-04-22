@@ -24,14 +24,14 @@ class Agent():
         self.env_specs = env_specs
 
         self.feature_pool = torch.nn.MaxPool2d(5)
-        self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 512, num_layers=2).to(device)
+        self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 256, num_layers=2).to(device)
         self.actor = torch.nn.Sequential(torch.nn.Tanh(),
-                                         torch.nn.Linear(512, 256),
+                                         torch.nn.Linear(256, 256),
                                         torch.nn.Tanh(),
                                          torch.nn.Linear(256, 4), 
                                          torch.nn.Softmax(dim=-1)).to(device)
         self.critic = torch.nn.Sequential(torch.nn.Tanh(),
-                                          torch.nn.Linear(512, 256),
+                                          torch.nn.Linear(256, 256),
                                           torch.nn.Tanh(), 
                                           torch.nn.Linear(256, 1)).to(device)
 
