@@ -24,18 +24,18 @@ class Agent():
         self.env_specs = env_specs
 
         self.feature_pool = torch.nn.MaxPool2d(5)
-        self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 256, num_layers=2).to(device)
+        self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 128, num_layers=1).to(device)
         self.actor = torch.nn.Sequential(torch.nn.Tanh(),
-                                         torch.nn.Linear(256, 256),
+                                         torch.nn.Linear(128, 128),
                                         torch.nn.Tanh(),
-                                         torch.nn.Linear(256, 4), 
+                                         torch.nn.Linear(128, 4), 
                                          torch.nn.Softmax(dim=-1)).to(device)
         self.critic = torch.nn.Sequential(torch.nn.Tanh(),
-                                          torch.nn.Linear(256, 256),
+                                          torch.nn.Linear(128, 128),
                                           torch.nn.Tanh(), 
-                                          torch.nn.Linear(256, 1)).to(device)
+                                          torch.nn.Linear(128, 1)).to(device)
 
-        self.optimizer = torch.optim.Adam([
+        self.optimizer = torch.optim.Adam([ {'params': self.actor_lstm.parameters(), 'lr': 0.001},
                         {'params': self.actor.parameters(), 'lr': 0.0003},
                         {'params': self.critic.parameters(), 'lr': 0.001}
                     ])
@@ -47,7 +47,7 @@ class Agent():
         self.window = int(self.num_stack/2)
         self.batch_size = 2500
         self.t = 0
-        self.eps_clip = 0.2
+        self.eps_clip = 0.1
 
         self.gamma = 1
         self.discounts = torch.tensor([self.gamma**i for i in range(self.window)]).to(device)
@@ -130,7 +130,7 @@ class Agent():
                     surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantage
 
                     # final loss of clipped objective PPO
-                    loss = -torch.min(surr1, surr2) + 0.5*self.MseLoss(value, rewards) - 0.01*dist_entropy
+                    loss = -torch.min(surr1, surr2) + self.MseLoss(value, rewards) - 0.01*dist_entropy
                     loss = loss.mean()
                     #print(loss)
 
@@ -204,4 +204,3 @@ class Agent():
     
     def _tensor_from_queue(self, queue):
         return torch.tensor(queue).to(device)
-
