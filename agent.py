@@ -69,7 +69,7 @@ class Agent():
         self.actor.load_state_dict(torch.load(actor_weights))
         
         critic_weights = os.path.join(root_path, 'critic.pth')
-        self.critic.load_state_dict(torch.load(policy_weights))
+        self.critic.load_state_dict(torch.load(critic_weights))
         
 
     def act(self, curr_obs, mode='eval'):
