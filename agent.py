@@ -132,7 +132,6 @@ class Agent():
                     # final loss of clipped objective PPO
                     loss = -torch.min(surr1, surr2) + self.MseLoss(value, rewards) - 0.01*dist_entropy
                     loss = loss.mean()
-                    #print(loss)
 
                     self.optimizer.zero_grad()
                     loss.backward()
@@ -148,9 +147,6 @@ class Agent():
                 dist = torch.distributions.Categorical(probs=next_probs)
 
                 self.old_log_probs = dist.log_prob(self._tensor_from_queue(self.actions)[self.window:])
-            
-            if timestep > 4990 and timestep < 5000:
-                print(probs)
             
         if done:
             self.model_save()
