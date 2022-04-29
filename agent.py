@@ -24,18 +24,20 @@ class Agent():
         self.env_specs = env_specs
 
         self.feature_pool = torch.nn.MaxPool2d(5)
-        self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 128, num_layers=1).to(device)
+        self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 128).to(device)
         self.actor = torch.nn.Sequential(torch.nn.Tanh(),
                                          torch.nn.Linear(128, 128),
                                         torch.nn.Tanh(),
                                          torch.nn.Linear(128, 4), 
                                          torch.nn.Softmax(dim=-1)).to(device)
+        self.critic_lstm = torch.nn.LSTM(15*15*4+3+27, 128).to(device)
         self.critic = torch.nn.Sequential(torch.nn.Tanh(),
                                           torch.nn.Linear(128, 128),
                                           torch.nn.Tanh(), 
                                           torch.nn.Linear(128, 1)).to(device)
 
-        self.optimizer = torch.optim.Adam([ {'params': self.actor_lstm.parameters(), 'lr': 0.001},
+        self.optimizer = torch.optim.Adam([ {'params': self.actor_lstm.parameters(), 'lr': 0.0003},
+                                           {'params': self.critic_lstm.parameters(), 'lr': 0.001},
                         {'params': self.actor.parameters(), 'lr': 0.0003},
                         {'params': self.critic.parameters(), 'lr': 0.001}
                     ])
@@ -43,13 +45,13 @@ class Agent():
 
         #self.g_last_goal = np.zeros(11)
         
-        self.num_stack = 10000
+        self.num_stack = 2000
         self.window = int(self.num_stack/2)
-        self.batch_size = 2500
+        self.batch_size = 125
         self.t = 0
-        self.eps_clip = 0.1
+        self.eps_clip = 0.2
 
-        self.gamma = 1
+        self.gamma = 0.997
         self.discounts = torch.tensor([self.gamma**i for i in range(self.window)]).to(device)
         self.epochs = 3
 
@@ -65,11 +67,14 @@ class Agent():
         lstm_weights = os.path.join(root_path, 'policy_lstm.pth')
         self.actor_lstm.load_state_dict(torch.load(lstm_weights))
         
+        critic_lstm_weights = os.path.join(root_path, 'critic_lstm.pth')
+        self.critic_lstm.load_state_dict(torch.load(critic_lstm_weights))
+        
         actor_weights = os.path.join(root_path, 'actor.pth')
         self.actor.load_state_dict(torch.load(actor_weights))
         
         critic_weights = os.path.join(root_path, 'critic.pth')
-        self.critic.load_state_dict(torch.load(policy_weights))
+        self.critic.load_state_dict(torch.load(critic_weights))
         
 
     def act(self, curr_obs, mode='eval'):
@@ -123,6 +128,7 @@ class Agent():
                     dist_entropy = dist.entropy()
 
                     rewards = self.calculate_return(i*self.batch_size, (i+1)*self.batch_size)
+                    rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
                     advantage = rewards - value.detach()
 
                     ratios = torch.exp(dist.log_prob(self._tensor_from_queue(self.actions)[i*self.batch_size:(i+1)*self.batch_size])-self.old_log_probs[i*self.batch_size:(i+1)*self.batch_size])
@@ -130,6 +136,7 @@ class Agent():
                     surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantage
 
                     # final loss of clipped objective PPO
+                    #print(dist_entropy)
                     loss = -torch.min(surr1, surr2) + self.MseLoss(value, rewards) - 0.01*dist_entropy
                     loss = loss.mean()
                     #print(loss)
@@ -149,9 +156,6 @@ class Agent():
 
                 self.old_log_probs = dist.log_prob(self._tensor_from_queue(self.actions)[self.window:])
             
-            if timestep > 4990 and timestep < 5000:
-                print(probs)
-            
         if done:
             self.model_save()
             
@@ -162,6 +166,9 @@ class Agent():
     def model_save(self):
         PATH = 'policy_lstm.pth'
         torch.save(self.actor_lstm.state_dict(), PATH)
+        
+        PATH = 'critic_lstm.pth'
+        torch.save(self.critic_lstm.state_dict(), PATH)
         
         PATH = 'actor.pth'
         torch.save(self.actor.state_dict(), PATH)
@@ -194,7 +201,7 @@ class Agent():
     def critic_function(self, features, scents, vision):
         inputs = torch.cat([features, scents, vision], dim=1).unsqueeze(1).to(device)
 
-        h, _ = self.actor_lstm(inputs.float())
+        h, _ = self.critic_lstm(inputs.float())
         output = self.critic(h.squeeze())
         
         return torch.squeeze(output)
