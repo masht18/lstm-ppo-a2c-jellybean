@@ -23,13 +23,18 @@ class Agent():
     def __init__(self, env_specs):
         self.env_specs = env_specs
 
+        #Pooling fuction for vision
         self.feature_pool = torch.nn.MaxPool2d(5)
+        
+        # Actor
         self.actor_lstm = torch.nn.LSTM(15*15*4+3+27, 128).to(device)
         self.actor = torch.nn.Sequential(torch.nn.Tanh(),
                                          torch.nn.Linear(128, 128),
                                         torch.nn.Tanh(),
                                          torch.nn.Linear(128, 4), 
                                          torch.nn.Softmax(dim=-1)).to(device)
+        
+        # Critic
         self.critic_lstm = torch.nn.LSTM(15*15*4+3+27, 128).to(device)
         self.critic = torch.nn.Sequential(torch.nn.Tanh(),
                                           torch.nn.Linear(128, 128),
@@ -42,25 +47,35 @@ class Agent():
                         {'params': self.critic.parameters(), 'lr': 0.001}
                     ])
         self.MseLoss = torch.nn.MSELoss()
-
-        #self.g_last_goal = np.zeros(11)
         
+        # 2 times the time horizon (steps to take before gradient descent), the extra is for calculating old log probs
         self.num_stack = 2000
+        
+        # The actual time horizon
         self.window = int(self.num_stack/2)
+        
+        # Batch size
         self.batch_size = 125
         self.t = 0
+        
+        # Episode clipping
         self.eps_clip = 0.2
 
+        # Discount
         self.gamma = 0.997
         self.discounts = torch.tensor([self.gamma**i for i in range(self.window)]).to(device)
+        
+        #Epochs
         self.epochs = 3
-
+        
+        # Features buffers
         self.vision_frames = deque(maxlen=self.num_stack)
         self.scent_frames = deque(maxlen=self.num_stack)
         self.feature_frames = deque(maxlen=self.num_stack)
         self.rewards = deque(maxlen=self.num_stack)
         self.actions = deque(maxlen=self.num_stack)
         
+        # Save results of next actions under old policy
         self.old_log_probs = torch.zeros(self.window).to(device)
 
     def load_weights(self, root_path):
@@ -104,8 +119,10 @@ class Agent():
         #next_features = self.pool_features(next_features)
         #curr_features = self.pool_features(curr_features)
         
+        # Compress vision space
         curr_vision = self.pool_vision(curr_vision)
         
+        # Collect features
         self.vision_frames.append(curr_vision)
         self.scent_frames.append(curr_scent)
         self.feature_frames.append(curr_features)
@@ -113,25 +130,36 @@ class Agent():
         self.actions.append(action)
         self.t += 1
         
+        # Once we collected 2*time horizon steps
         if self.t == self.num_stack:
             
             # update for given num epochs
             for _ in range(self.epochs):
+                # for btach_size of steps in time horizon
                 for i in range(int(self.window/self.batch_size)):
                     value = self.critic_function(self._tensor_from_queue(self.feature_frames)[i*self.batch_size:(i+1)*self.batch_size], 
                                              self._tensor_from_queue(self.scent_frames)[i*self.batch_size:(i+1)*self.batch_size],
                                             self._tensor_from_queue(self.vision_frames)[i*self.batch_size:(i+1)*self.batch_size])
+                    
+                    # get entropy and log probs of policy
                     probs = self.policy_function(self._tensor_from_queue(self.feature_frames)[i*self.batch_size:(i+1)*self.batch_size], 
                                                  self._tensor_from_queue(self.scent_frames)[i*self.batch_size:(i+1)*self.batch_size],
                                                  self._tensor_from_queue(self.vision_frames)[i*self.batch_size:(i+1)*self.batch_size])
                     dist = torch.distributions.Categorical(probs=probs)
                     dist_entropy = dist.entropy()
 
+                    # Get discounted return
                     rewards = self.calculate_return(i*self.batch_size, (i+1)*self.batch_size)
+                    
+                    # Normalize return
                     rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+                    
+                    # Advantage
                     advantage = rewards - value.detach()
 
+                    # Ratio of old log probs/new log probs
                     ratios = torch.exp(dist.log_prob(self._tensor_from_queue(self.actions)[i*self.batch_size:(i+1)*self.batch_size])-self.old_log_probs[i*self.batch_size:(i+1)*self.batch_size])
+              
                     surr1 = ratios * advantage
                     surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantage
 
