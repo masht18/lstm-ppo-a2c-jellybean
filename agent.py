@@ -139,7 +139,6 @@ class Agent():
                     #print(dist_entropy)
                     loss = -torch.min(surr1, surr2) + self.MseLoss(value, rewards) - 0.01*dist_entropy
                     loss = loss.mean()
-                    #print(loss)
 
                     self.optimizer.zero_grad()
                     loss.backward()
